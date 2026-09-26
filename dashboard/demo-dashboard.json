@@ -510,7 +510,7 @@
             "transformations": []
           }
         },
-        "description": "",
+        "description": "Raw lag velocity is messages/second multiplied by 100: 100 means 1 message/second. Positive values mean growing lag; negative values mean catching up. This panel does not divide the raw gauge by 100.",
         "id": 4,
         "links": [],
         "title": "Lag Velocity by Group (Positive = Growing)",
@@ -650,7 +650,7 @@
             ]
           }
         },
-        "description": "",
+        "description": "One-hot state gauges: 1 marks the current state, 0 the others. Classic rebalances use preparing_rebalance/completing_rebalance; KIP-848 uses assigning/reconciling. State alone does not prove that offsets are advancing.",
         "id": 5,
         "links": [],
         "title": "Consumer Group State",
@@ -834,10 +834,10 @@
             "transformations": []
           }
         },
-        "description": "Shows cumulative state changes over time. Spikes indicate state transitions (rebalances, failures).",
+        "description": "Current state gauges filtered to values above zero, shown over time. This is state history, not a cumulative transition counter; samples can miss transitions between scrapes.",
         "id": 20,
         "links": [],
-        "title": "Consumer Group State Changes",
+        "title": "Consumer Group State History",
         "vizConfig": {
           "group": "timeseries",
           "kind": "VizConfig",
@@ -1149,7 +1149,7 @@
             "transformations": []
           }
         },
-        "description": "",
+        "description": "Maximum topic-level time-lag estimate in milliseconds. The partition=\"\" selector excludes per-partition series and selects the aggregate. Missing estimates are not proof of zero lag.",
         "id": 26,
         "links": [],
         "title": "Max Time Lag",
@@ -1315,7 +1315,7 @@
             "transformations": []
           }
         },
-        "description": "Lag in milliseconds based on Kafka message timestamps",
+        "description": "Topic-level lag estimate in milliseconds, from Kafka timestamps or poll-history interpolation. The partition=\"\" selector selects series without a partition label, avoiding duplicate aggregate and partition curves.",
         "id": 28,
         "links": [],
         "title": "Time Lag by Consumer Group",
@@ -1433,7 +1433,7 @@
             "transformations": []
           }
         },
-        "description": "Estimated seconds until lag reaches zero (only shown when consumer is catching up)",
+        "description": "Estimated seconds to catch up at the current rate, emitted only while catching up above TIME_LAG_MIN_MESSAGES. An absent series does not mean the group has caught up.",
         "id": 29,
         "links": [],
         "title": "Time to Close Lag (Catching Up Only)",
@@ -1720,7 +1720,7 @@
             "transformations": []
           }
         },
-        "description": "Percentage of topic retention consumed by consumer lag. High values indicate risk of data loss.",
+        "description": "Topic-level retention risk. The raw gauge is percent multiplied by 100; this query divides by 100. The partition=\"\" selector keeps only aggregates. 100% indicates risk that required data is already outside the retention window.",
         "id": 32,
         "links": [],
         "title": "Retention Percent by Consumer Group",
@@ -1864,7 +1864,7 @@
             ]
           }
         },
-        "description": "Topics where consumer lag exceeds 50% of retention period. These are at risk of data loss.",
+        "description": "Group/topic aggregates above 50% retention usage. The query divides the raw gauge by 100 before comparing to 50; partition=\"\" excludes per-partition series. These are risk estimates, not verified data loss.",
         "id": 33,
         "links": [],
         "title": "At Risk Topics (>50% Retention Used)",
