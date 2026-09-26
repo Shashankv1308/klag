@@ -7,6 +7,15 @@
 # series differing only by pod. Keep at 1 unless you deduplicate downstream.
 replicaCount: 1
 
+terminationGracePeriodSeconds: 30
+
+# Disabled by default: minAvailable: 1 blocks voluntary eviction of a lone pod.
+# Set minAvailable to null when using maxUnavailable instead.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: null
+
 image:
   repository: themoah/klag
   # Overrides the image tag whose default is the chart appVersion.

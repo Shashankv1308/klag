@@ -152,6 +152,68 @@ validate_output "Uses existing Kafka secret" "${TESTS_DIR}/test-values-existing-
 validate_output "Uses existing OTLP secret" "${TESTS_DIR}/test-values-existing-secret.yaml" "name: my-otlp-credentials"
 
 echo ""
+echo "--- Disruption Budget Tests ---"
+validate_not_present "PDB disabled by default" "" "kind: PodDisruptionBudget"
+validate_output "Default shutdown grace" "" '^      terminationGracePeriodSeconds: 30$'
+validate_output "Custom shutdown grace" "" '^      terminationGracePeriodSeconds: 60$' "--set terminationGracePeriodSeconds=60"
+validate_output "Zero shutdown grace preserved" "" '^      terminationGracePeriodSeconds: 0$' "--set terminationGracePeriodSeconds=0"
+
+for kube_version in 1.19.0 1.20.0 1.21.0 1.25.0; do
+    api_version="policy/v1"
+    case "$kube_version" in 1.19.*|1.20.*) api_version="policy/v1beta1" ;; esac
+    args="--kube-version ${kube_version} --set podDisruptionBudget.enabled=true"
+    run_test "PDB on Kubernetes ${kube_version}" "" "$args"
+    validate_output "PDB API on ${kube_version}" "" "^apiVersion: ${api_version}$" "$args"
+done
+
+for field in minAvailable maxUnavailable; do
+    other=minAvailable
+    [ "$field" = minAvailable ] && other=maxUnavailable
+    for value in 0 1 '50%'; do
+        args="--set podDisruptionBudget.enabled=true --set podDisruptionBudget.${other}=null --set podDisruptionBudget.${field}=${value}"
+        expected="$value"
+        [ "$value" = '50%' ] && expected='"50%"'
+        run_test "PDB ${field}=${value}" "" "$args"
+        validate_output "PDB preserves ${field}=${value}" "" "^  ${field}: ${expected}$" "$args"
+        validate_not_present "PDB omits ${other}" "" "^  ${other}:" "$args"
+    done
+done
+
+for overrides in 'minAvailable=1,maxUnavailable=1' 'minAvailable=0,maxUnavailable=0' 'minAvailable=null,maxUnavailable=null'; do
+    echo -n "Validating: PDB rejects ${overrides}... "
+    # Repeat the namespace for Helm's comma-separated --set pairs.
+    overrides="podDisruptionBudget.${overrides/,/,podDisruptionBudget.}"
+    if output=$(helm template test-release "$CHART_DIR" --set podDisruptionBudget.enabled=true --set "$overrides" 2>&1); then
+        echo -e "${RED}FAILED${NC} (template unexpectedly succeeded)"
+        ((failed++))
+    elif [[ "$output" == *'requires exactly one of minAvailable or maxUnavailable'* ]]; then
+        echo -e "${GREEN}PASSED${NC}"
+        ((passed++))
+    else
+        echo -e "${RED}FAILED${NC} (unexpected error: ${output})"
+        ((failed++))
+    fi
+done
+
+echo -n "Validating: PDB selector matches Deployment... "
+if deployment=$(helm template selected-release "$CHART_DIR" --set nameOverride=custom --show-only templates/deployment.yaml) &&
+   pdb=$(helm template selected-release "$CHART_DIR" --set nameOverride=custom --set podDisruptionBudget.enabled=true --show-only templates/poddisruptionbudget.yaml); then
+    selector() { awk '/^  selector:/{found=1;next} found && /^  [^ ]/{exit} found {print}'; }
+    deployment_selector=$(printf '%s\n' "$deployment" | selector)
+    pdb_selector=$(printf '%s\n' "$pdb" | selector)
+    if [ -n "$pdb_selector" ] && [ "$pdb_selector" = "$deployment_selector" ]; then
+        echo -e "${GREEN}PASSED${NC}"
+        ((passed++))
+    else
+        echo -e "${RED}FAILED${NC} (selector mismatch)"
+        ((failed++))
+    fi
+else
+    echo -e "${RED}FAILED${NC} (template failed)"
+    ((failed++))
+fi
+
+echo ""
 echo "--- Kubernetes Schema Validation ---"
 echo -n "Validating Kubernetes manifests... "
 if helm template test-release "${CHART_DIR}" -f "${TESTS_DIR}/test-values.yaml" 2>/dev/null | kubectl apply --dry-run=client -f - > /dev/null 2>&1; then
