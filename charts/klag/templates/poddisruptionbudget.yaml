@@ -1,0 +1,26 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $min := ne .Values.podDisruptionBudget.minAvailable nil }}
+{{- $max := ne .Values.podDisruptionBudget.maxUnavailable nil }}
+{{- if eq $min $max }}
+{{- fail "podDisruptionBudget requires exactly one of minAvailable or maxUnavailable; set the unused field to null" }}
+{{- end }}
+{{- if semverCompare ">=1.21-0" .Capabilities.KubeVersion.Version }}
+apiVersion: policy/v1
+{{- else }}
+apiVersion: policy/v1beta1
+{{- end }}
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "klag.fullname" . }}
+  labels:
+    {{- include "klag.labels" . | nindent 4 }}
+spec:
+  {{- if $min }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable | toJson }}
+  {{- else }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable | toJson }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "klag.selectorLabels" . | nindent 6 }}
+{{- end }}

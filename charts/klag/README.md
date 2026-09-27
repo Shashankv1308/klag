@@ -244,6 +244,31 @@ The pod always mounts an `emptyDir` at `/tmp` so the JVM and Netty work with the
 default `readOnlyRootFilesystem: true`. Chart-managed Secrets are checksummed into a pod
 annotation, so credential changes roll the Deployment automatically.
 
+### Disruption and shutdown configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `terminationGracePeriodSeconds` | Pod shutdown grace period in seconds | `30` |
+| `podDisruptionBudget.enabled` | Create a PodDisruptionBudget for voluntary disruptions | `false` |
+| `podDisruptionBudget.minAvailable` | Minimum available pods (integer or percentage); set to `null` to use `maxUnavailable` | `1` |
+| `podDisruptionBudget.maxUnavailable` | Maximum unavailable pods (integer or percentage) | `null` |
+
+When enabled, exactly one budget field must be set. For example:
+
+```yaml
+terminationGracePeriodSeconds: 60
+podDisruptionBudget:
+  enabled: true
+  minAvailable: null
+  maxUnavailable: 1
+```
+
+With one replica, `minAvailable: 1` can block voluntary eviction during node
+maintenance. A PDB does not add replicas or provide failover. Klag has no leader
+election: multiple replicas independently poll Kafka and can duplicate metrics
+(and push-reporter billing). Plan downstream deduplication before adding replicas.
+The PDB uses `policy/v1beta1` on Kubernetes 1.19–1.20 and `policy/v1` on 1.21+.
+
 ### NetworkPolicy Configuration
 
 | Parameter | Description | Default |
