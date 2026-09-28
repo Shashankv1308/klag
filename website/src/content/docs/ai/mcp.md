@@ -40,6 +40,10 @@ listed in `MCP_ALLOWED_ORIGINS`. This stops web pages, including DNS rebinding a
 from reading your consumer group data. Agents, SDKs, and curl send no `Origin` and are not
 affected.
 
+Klag sends no CORS headers, so a browser client on another origin also needs a reverse
+proxy that answers the `OPTIONS` preflight and adds them. Its origin still goes in
+`MCP_ALLOWED_ORIGINS`.
+
 The full HTTP surface, including this endpoint, is published as an OpenAPI 3.1 spec at
 [`klag.dev/openapi.json`](https://klag.dev/openapi.json).
 
