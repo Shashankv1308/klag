@@ -17,7 +17,9 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.junit5.VertxExtension;
 import io.vertx.junit5.VertxTestContext;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,10 +28,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * Over-the-wire integration tests for the MCP endpoint: real Vert.x HTTP server + client,
- * exercising auth, the GET-405 rule, JSON parse errors, and a full initialize->tools/call flow.
+ * exercising auth, the Origin and Content-Type checks, the GET-405 rule, JSON parse errors, and a
+ * full initialize->tools/call flow.
  */
 @ExtendWith(VertxExtension.class)
 class McpHttpIntegrationTest {
+
+  private static final String PING = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
 
   private Vertx vertx;
   private HttpClient client;
@@ -55,13 +60,20 @@ class McpHttpIntegrationTest {
 
   /** POST JSON body, return [statusCode, bodyJsonOrNull] via callback. */
   private void post(String authHeader, JsonObject body, Function<HttpResult, Void> assertion, VertxTestContext ctx) {
+    Map<String, String> headers = new HashMap<>(Map.of("content-type", "application/json"));
+    if (authHeader != null) {
+      headers.put("Authorization", authHeader);
+    }
+    send(headers, body.encode(), assertion, ctx);
+  }
+
+  /** POST a raw body with exactly the given headers. */
+  private void send(Map<String, String> headers, String body, Function<HttpResult, Void> assertion,
+      VertxTestContext ctx) {
     client.request(HttpMethod.POST, port, "localhost", "/mcp")
       .compose(req -> {
-        req.putHeader("content-type", "application/json");
-        if (authHeader != null) {
-          req.putHeader("Authorization", authHeader);
-        }
-        return req.send(Buffer.buffer(body.encode()));
+        headers.forEach(req::putHeader);
+        return req.send(Buffer.buffer(body));
       })
       .compose(resp -> resp.body().map(b -> new HttpResult(resp.statusCode(), b)))
       .onSuccess(result -> ctx.verify(() -> {
@@ -112,6 +124,71 @@ class McpHttpIntegrationTest {
   void authorizedWithCorrectToken(VertxTestContext ctx) {
     deployThen(enabled("s3cret"), storeWithPayments(), ctx, () ->
       post("Bearer s3cret", new JsonObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping"),
+        r -> {
+          assertEquals(200, r.status());
+          assertTrue(r.json().containsKey("result"));
+          return null;
+        }, ctx));
+  }
+
+  @Test
+  void foreignOriginIsForbidden(VertxTestContext ctx) {
+    // What a DNS-rebinding page sends: the browser attaches the page's own origin.
+    deployThen(enabled(null), storeWithPayments(), ctx, () ->
+      send(Map.of("content-type", "application/json", "Origin", "http://evil.example"), PING,
+        r -> {
+          assertEquals(403, r.status());
+          assertTrue(r.json().containsKey("error"));
+          return null;
+        }, ctx));
+  }
+
+  @Test
+  void foreignOriginIsForbiddenEvenWithValidToken(VertxTestContext ctx) {
+    deployThen(enabled("s3cret"), storeWithPayments(), ctx, () ->
+      send(Map.of("content-type", "application/json", "Origin", "http://evil.example",
+          "Authorization", "Bearer s3cret"), PING,
+        r -> { assertEquals(403, r.status()); return null; }, ctx));
+  }
+
+  @Test
+  void allowlistedOriginIsAccepted(VertxTestContext ctx) {
+    McpConfig config = McpConfig.from(k -> switch (k) {
+      case "MCP_ENABLED" -> "true";
+      case "MCP_ALLOWED_ORIGINS" -> "https://ops.example.com";
+      default -> null;
+    });
+    deployThen(config, storeWithPayments(), ctx, () ->
+      send(Map.of("content-type", "application/json", "Origin", "https://ops.example.com"), PING,
+        r -> {
+          assertEquals(200, r.status());
+          assertTrue(r.json().containsKey("result"));
+          return null;
+        }, ctx));
+  }
+
+  @Test
+  void textPlainIsUnsupportedMediaType(VertxTestContext ctx) {
+    // text/plain is a CORS simple request, which browsers send cross-site without a preflight.
+    deployThen(enabled(null), storeWithPayments(), ctx, () ->
+      send(Map.of("content-type", "text/plain"), PING,
+        r -> {
+          assertEquals(415, r.status());
+          assertTrue(r.json().containsKey("error"));
+          return null;
+        }, ctx));
+  }
+
+  @Test
+  void missingContentTypeIsUnsupportedMediaType(VertxTestContext ctx) {
+    deployThen(enabled(null), storeWithPayments(), ctx, () ->
+      send(Map.of(), PING, r -> { assertEquals(415, r.status()); return null; }, ctx));
+  }
+
+  @Test
+  void jsonWithCharsetIsAccepted(VertxTestContext ctx) {
+    deployThen(enabled(null), storeWithPayments(), ctx, () ->
+      send(Map.of("content-type", "application/json; charset=utf-8"), PING,
         r -> {
           assertEquals(200, r.status());
           assertTrue(r.json().containsKey("result"));

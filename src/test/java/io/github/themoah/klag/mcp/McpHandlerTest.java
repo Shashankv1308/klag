@@ -145,4 +145,43 @@ class McpHandlerTest {
     assertFalse(h.authorized("Basic s3cret"));
     assertFalse(h.authorized("Bearer"));
   }
+
+  @Test
+  void originAllowedWhenAbsentOrListed() {
+    McpHandler h = handler(McpConfig.from(k -> switch (k) {
+      case "MCP_ENABLED" -> "true";
+      case "MCP_ALLOWED_ORIGINS" -> "https://ops.example.com,http://localhost:3000";
+      default -> null;
+    }));
+    assertTrue(h.originAllowed(null));
+    assertTrue(h.originAllowed("https://ops.example.com"));
+    assertTrue(h.originAllowed("http://localhost:3000"));
+    assertTrue(h.originAllowed("HTTPS://OPS.EXAMPLE.COM"));
+    assertFalse(h.originAllowed("http://evil.example"));
+    assertFalse(h.originAllowed("https://ops.example.com.evil.example"));
+    assertFalse(h.originAllowed("http://localhost:3001"));
+    // Sandboxed frames and file:// pages send the literal "null".
+    assertFalse(h.originAllowed("null"));
+  }
+
+  @Test
+  void anyOriginRejectedByDefault() {
+    McpHandler h = openHandler();
+    assertTrue(h.originAllowed(null));
+    assertFalse(h.originAllowed("http://localhost:8888"));
+    assertFalse(h.originAllowed(""));
+  }
+
+  @Test
+  void jsonContentTypeIgnoresCaseAndParameters() {
+    assertTrue(McpHandler.isJsonContentType("application/json"));
+    assertTrue(McpHandler.isJsonContentType("application/json; charset=utf-8"));
+    assertTrue(McpHandler.isJsonContentType("Application/JSON;charset=UTF-8"));
+    assertFalse(McpHandler.isJsonContentType(null));
+    assertFalse(McpHandler.isJsonContentType(""));
+    assertFalse(McpHandler.isJsonContentType("text/plain"));
+    assertFalse(McpHandler.isJsonContentType("application/x-www-form-urlencoded"));
+    assertFalse(McpHandler.isJsonContentType("multipart/form-data; boundary=x"));
+    assertFalse(McpHandler.isJsonContentType("application/json-patch+json"));
+  }
 }
