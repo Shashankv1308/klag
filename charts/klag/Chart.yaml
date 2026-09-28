@@ -2,8 +2,8 @@ apiVersion: v2
 name: klag
 description: A Helm chart for Klag - A simple, lightweight Kafka Lag Exporter with pluggable metrics sinks.
 type: application
-version: 0.3.16
-appVersion: "0.2.17"
+version: 0.3.17
+appVersion: "0.2.18"
 home: https://github.com/themoah/klag
 icon: https://avatars.githubusercontent.com/themoah
 sources:
@@ -34,6 +34,10 @@ annotations:
     - name: themoah
       email: aviv@dozorets.com
   artifacthub.io/changes: |
+    - kind: fixed
+      description: A consumer group that fails every cycle (ACL gap, wedged coordinator) no longer freezes stale-series cleanup for the whole cluster; only that group's last good series are held
+    - kind: fixed
+      description: A partition read by several groups or chunks gets one throughput and one lag_ms poll sample per cycle, and throughput hot partitions are detected once per cycle instead of per chunk, which removes false and duplicate results when KAFKA_CHUNK_COUNT is above 1
     - kind: added
       description: Optional PodDisruptionBudget and configurable pod termination grace period, preserving Kubernetes 1.19 support
     - kind: fixed

@@ -127,7 +127,22 @@ public class HotPartitionDetector {
    */
   public Set<String> recordThroughputSnapshots(List<ConsumerGroupLag> lagData) {
     Set<String> activeKeys = new HashSet<>();
+    recordThroughputSnapshots(lagData, activeKeys);
+    return activeKeys;
+  }
 
+  /**
+   * Records a throughput snapshot for each partition whose key is not yet in
+   * {@code recordedKeys}, and adds that key.
+   *
+   * <p>Pass the same set for every chunk of a collection cycle. A partition shared across
+   * chunks then gets one sample per cycle instead of a second one at the same offset a chunk
+   * delay later, which pulls its throughput toward zero.
+   *
+   * @param lagData lag data containing logEndOffset for all partitions
+   * @param recordedKeys "topic:partition" keys already recorded this cycle, updated in place
+   */
+  public void recordThroughputSnapshots(List<ConsumerGroupLag> lagData, Set<String> recordedKeys) {
     // Track unique topic/partition combinations (avoid duplicates from multiple consumer groups)
     Map<TopicPartitionKey, Long> partitionOffsets = new HashMap<>();
 
@@ -142,11 +157,10 @@ public class HotPartitionDetector {
     // Record snapshots
     for (Map.Entry<TopicPartitionKey, Long> entry : partitionOffsets.entrySet()) {
       TopicPartitionKey key = entry.getKey();
-      throughputTracker.recordSnapshot(key.topic(), key.partition(), entry.getValue());
-      activeKeys.add(PartitionThroughputTracker.makeKey(key.topic(), key.partition()));
+      if (recordedKeys.add(PartitionThroughputTracker.makeKey(key.topic(), key.partition()))) {
+        throughputTracker.recordSnapshot(key.topic(), key.partition(), entry.getValue());
+      }
     }
-
-    return activeKeys;
   }
 
   /**

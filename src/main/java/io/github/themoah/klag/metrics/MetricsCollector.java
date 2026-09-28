@@ -10,6 +10,7 @@ import io.github.themoah.klag.metrics.dataskew.DataSkewConfig;
 import io.github.themoah.klag.metrics.dataskew.DataSkewDetector;
 import io.github.themoah.klag.metrics.hotpartition.HotPartitionConfig;
 import io.github.themoah.klag.metrics.hotpartition.HotPartitionDetector;
+import io.github.themoah.klag.metrics.hotpartition.PartitionThroughputTracker;
 import io.github.themoah.klag.metrics.snapshot.SnapshotBuilder;
 import io.github.themoah.klag.metrics.snapshot.SnapshotStore;
 import io.github.themoah.klag.metrics.timelag.LagMsCalculator;
@@ -92,6 +93,11 @@ public class MetricsCollector {
   // describeTopics sees them. One list call per cycle, not per chunk. Cleared with
   // cycleTopicOffsets; a failed lookup stays cached so the cycle fails once, not per chunk.
   private Future<Set<String>> cycleTopicNames;
+
+  // Each group's lag data from the last cycle that collected it. When a group fails a cycle,
+  // finishCycle holds the series of these partitions while it cleans up the rest.
+  // Replaced at every cycle end; only touched on the Vert.x event loop.
+  private Map<String, ConsumerGroupLag> lastLagByGroup = Map.of();
 
   // Guards against overlapping collection cycles when a cycle exceeds the interval
   // (large clusters, chunk delays). Only touched on the Vert.x event loop.
@@ -349,7 +355,7 @@ public class MetricsCollector {
    * Processes a single chunk of consumer groups: collects lag, describes groups, reports metrics.
    *
    * <p>Recovers on failure so one failed chunk neither aborts the remaining chunks nor fails
-   * the cycle; the cycle is marked partial instead (see {@link #finishCycle(CycleState)}).
+   * the cycle; its groups are recorded as failed instead (see {@link #finishCycle(CycleState)}).
    */
   private Future<Void> processGroupChunk(List<String> chunk, CycleState cycle) {
     log.debug("Processing group chunk with {} groups", chunk.size());
@@ -373,7 +379,7 @@ public class MetricsCollector {
         return null;
       })
       .recover(err -> {
-        cycle.partial = true;
+        cycle.failedGroups.addAll(chunk);
         log.warn("Failed to process group chunk of {} groups{} (skipped this cycle): {}",
           chunk.size(), clusterLog(), err.getMessage());
         return Future.succeededFuture(null);
@@ -385,31 +391,41 @@ public class MetricsCollector {
    *
    * <p>All stale-entry cleanups live here (not per chunk) because every cleanup is a
    * retainAll against the keys observed in the whole cycle: running any of them with a
-   * chunk-local subset wipes the accumulated state of every other chunk.
+   * chunk-local subset wipes the accumulated state of every other chunk. Throughput hot
+   * partitions are detected here too, after every chunk has recorded its samples: detection
+   * is cluster-wide, so running it per chunk would mix this cycle's samples with the last
+   * one's and repeat its results.
    *
-   * <p>Partial cycles (a chunk or a single group failed) skip cleanup: the failed keys are
-   * missing from the accumulators, and cleaning up against an incomplete key set would mark
-   * or delete live series. Stale values beat deleted series. Note this means a permanently
-   * failing group (ACL gap, wedged coordinator) freezes cleanup indefinitely — the WARN below
-   * names the group; fix its ACL or exclude it via METRICS_GROUP_EXCLUDE.
+   * <p>On a partial cycle (a chunk or a single group failed) the failed groups' keys are
+   * missing from the accumulators, and cleaning up against that incomplete key set would mark
+   * or delete their live series. Their previous keys are added back first (see
+   * {@link #holdFailedGroups(CycleState)}), so a failed group keeps its last good values while
+   * series that really disappeared are still retired. A permanently failing group (ACL gap,
+   * wedged coordinator) only holds its own series; fix its ACL or exclude it via
+   * METRICS_GROUP_EXCLUDE.
    *
    * <p>The MCP snapshot still publishes on a partial cycle, because freezing it would leave
    * agents reading hours-old data while /metrics stays current. The exception is an empty
    * snapshot: nothing was collected at all, and wiping the agent view is worse than a stale one.
    */
   private void finishCycle(CycleState cycle) {
-    if (cycle.partial) {
-      log.warn("Collection cycle was partial{} (at least one chunk or group failed); "
-        + "keeping previous metrics and skipping stale cleanup until a full cycle succeeds",
-        clusterLog());
-      if (cycle.snapshot != null && !cycle.snapshot.groups.isEmpty()) {
-        publishSnapshot(cycle.snapshot);
-      }
-      return;
+    boolean partial = !cycle.failedGroups.isEmpty();
+    if (partial) {
+      log.warn("Collection cycle was partial{}: {} group(s) failed; holding their previous "
+        + "metrics and cleaning up the rest", clusterLog(), cycle.failedGroups.size());
+      holdFailedGroups(cycle);
     }
+    lastLagByGroup = cycle.lagByGroup;
+
     velocityTracker.cleanupStaleTopics(cycle.velocityKeys);
     if (hotPartitionDetector != null && hotPartitionDetector.isEnabled()) {
       hotPartitionDetector.cleanupStalePartitions(cycle.throughputKeys);
+      List<HotPartitionThroughput> hotByThroughput =
+        hotPartitionDetector.detectHotPartitionsByThroughput();
+      reporter.reportHotPartitionThroughput(hotByThroughput, cycle.activeKeys);
+      if (cycle.snapshot != null) {
+        cycle.snapshot.throughput.addAll(hotByThroughput);
+      }
     }
     if (offsetTimestampTracker != null) {
       offsetTimestampTracker.cleanupStalePartitions(cycle.timeLagKeys);
@@ -419,7 +435,48 @@ public class MetricsCollector {
     }
     reporter.cleanupStaleGauges(cycle.activeKeys);
     reporter.cleanupStateTracker(cycle.stateGroupKeys);
-    publishSnapshot(cycle.snapshot);
+    if (!partial || (cycle.snapshot != null && !cycle.snapshot.groups.isEmpty())) {
+      publishSnapshot(cycle.snapshot);
+    }
+  }
+
+  /**
+   * Adds the previous keys of every group that failed this cycle back into the cycle's
+   * accumulators, so the cleanups in {@link #finishCycle(CycleState)} hold its series. The
+   * keys come from the last cycle that collected the group; that lag data is carried forward
+   * while the group keeps failing.
+   *
+   * <p>Series without a consumer group (partition counts, ISR, size skew, throughput hot
+   * partitions) are held only for the failed groups' topics that no collected group reported
+   * this cycle. For a topic that was reported, a missing series is a real change, such as ISR
+   * recovering.
+   */
+  private void holdFailedGroups(CycleState cycle) {
+    Set<String> collectedTopics = new HashSet<>();
+    for (ConsumerGroupLag lag : cycle.lagByGroup.values()) {
+      lag.partitions().forEach(p -> collectedTopics.add(p.topic()));
+    }
+
+    Set<String> heldTopics = new HashSet<>();
+    for (String group : cycle.failedGroups) {
+      ConsumerGroupLag previous = lastLagByGroup.get(group);
+      if (previous == null) {
+        continue;
+      }
+      cycle.lagByGroup.put(group, previous);
+      for (PartitionLag p : previous.partitions()) {
+        String groupTopic = LagVelocityTracker.makeKey(group, p.topic());
+        cycle.velocityKeys.add(groupTopic);
+        cycle.commitStalenessKeys.add(groupTopic);
+        cycle.throughputKeys.add(PartitionThroughputTracker.makeKey(p.topic(), p.partition()));
+        cycle.timeLagKeys.add(p.topic() + ":" + p.partition());
+        if (!collectedTopics.contains(p.topic())) {
+          heldTopics.add(p.topic());
+        }
+      }
+    }
+    cycle.stateGroupKeys.addAll(cycle.failedGroups);
+    reporter.holdGauges(cycle.failedGroups, heldTopics, cycle.activeKeys);
   }
 
   /**
@@ -476,6 +533,7 @@ public class MetricsCollector {
     // Report topic partition counts (max partition number + 1)
     Map<String, Integer> topicPartitions = new HashMap<>();
     for (ConsumerGroupLag group : lagData) {
+      cycle.lagByGroup.put(group.consumerGroup(), group);
       for (PartitionLag p : group.partitions()) {
         topicPartitions.merge(p.topic(), p.partition() + 1, Integer::max);
       }
@@ -509,12 +567,14 @@ public class MetricsCollector {
     }
 
     // Record snapshots for velocity calculation (velocityKeys accumulates across chunks)
+    Set<String> chunkVelocityKeys = new HashSet<>();
     groupTopicAggregates.forEach((consumerGroup, topicMap) ->
       topicMap.forEach((topic, agg) -> {
         recordVelocitySnapshot(consumerGroup, topic, agg);
-        velocityKeys.add(LagVelocityTracker.makeKey(consumerGroup, topic));
+        chunkVelocityKeys.add(LagVelocityTracker.makeKey(consumerGroup, topic));
       })
     );
+    velocityKeys.addAll(chunkVelocityKeys);
 
     // Commit freshness: track when each group+topic last advanced its committed offset.
     // Staleness is only reported when lag > 0 (a frozen-but-idle consumer is not stuck).
@@ -540,8 +600,10 @@ public class MetricsCollector {
       reporter.reportCommitStaleness(stalenessData, activeKeys);
     }
 
-    // Calculate and report velocities
-    List<LagVelocity> velocities = velocityTracker.calculateVelocities();
+    // Calculate and report velocities for this call's groups only. The tracker holds every
+    // group's history; reporting all of it per chunk would also keep a vanished group's
+    // velocity active until its history is cleaned up.
+    List<LagVelocity> velocities = velocityTracker.calculateVelocities(chunkVelocityKeys);
     reporter.reportVelocity(velocities, activeKeys);
 
     // Calculate lag in ms from timestamps
@@ -577,18 +639,15 @@ public class MetricsCollector {
 
     // Hot partition detection and reporting
     List<HotPartitionLag> hotByLag = List.of();
-    List<HotPartitionThroughput> hotByThroughput = List.of();
     if (hotPartitionDetector != null && hotPartitionDetector.isEnabled()) {
-      // Accumulate active throughput keys across chunks; cleanup happens once per
-      // cycle (see collectAndReportChunked / collectAllGroupsParallel). Cleaning up
-      // here per-chunk would retainAll() away other chunks' throughput histories.
-      throughputKeys.addAll(hotPartitionDetector.recordThroughputSnapshots(lagData));
+      // Accumulate throughput keys across chunks. A partition already sampled by an earlier
+      // chunk is skipped, so it gets one sample per cycle. Cleanup and throughput detection
+      // run once per cycle in finishCycle: per chunk, cleanup would retainAll() away other
+      // chunks' throughput histories.
+      hotPartitionDetector.recordThroughputSnapshots(lagData, throughputKeys);
 
       hotByLag = hotPartitionDetector.detectHotPartitionsByLag(lagData);
       reporter.reportHotPartitionLag(hotByLag, activeKeys);
-
-      hotByThroughput = hotPartitionDetector.detectHotPartitionsByThroughput();
-      reporter.reportHotPartitionThroughput(hotByThroughput, activeKeys);
     }
 
     // Accumulate this call's derived metrics into the cycle snapshot for the MCP layer.
@@ -598,11 +657,11 @@ public class MetricsCollector {
         transitionsByGroup.put(lag.consumerGroup(),
           reporter.recentStateTransitions(lag.consumerGroup()));
       }
+      // Throughput outliers are cluster-wide; finishCycle adds them once per cycle.
       MetricsSnapshot partial = SnapshotBuilder.build(0L, lagData, stateData, velocities,
-        lagMsData, timeToCloseEstimates, retentionRisks, hotByLag, hotByThroughput,
+        lagMsData, timeToCloseEstimates, retentionRisks, hotByLag, List.of(),
         transitionsByGroup, lagTrendDeadband, stalenessByGroup, underReplicated, sizeSkews);
       cycleSnapshot.groups.addAll(partial.groups());
-      cycleSnapshot.throughput.addAll(hotByThroughput);
     }
 
     log.debug("Reported metrics for {} consumer groups", lagData.size());
@@ -630,12 +689,12 @@ public class MetricsCollector {
         List<Future<ConsumerGroupOffsets>> futures = wave.stream()
           // Recover to null so one failing group (deleted mid-cycle, coordinator hiccup,
           // ACL gap) is skipped rather than failing the wave and aborting the cycle for
-          // every other group. The cycle is marked partial: a skipped group's keys are
-          // absent from the accumulators, so the retainAll cleanups in finishCycle would
-          // delete its live series instead of holding the last good values.
+          // every other group. The group is recorded as failed: its keys are absent from
+          // the accumulators, so finishCycle adds its previous keys back before the
+          // retainAll cleanups, holding its last good values instead of deleting them.
           .map(groupId -> kafkaClient.getConsumerGroupOffsets(groupId)
             .recover(err -> {
-              cycle.partial = true;
+              cycle.failedGroups.add(groupId);
               log.warn("Failed to collect lag for group {}{} (skipped this cycle): {}",
                 groupId, clusterLog(), err.getMessage());
               return Future.succeededFuture(null);
@@ -662,17 +721,17 @@ public class MetricsCollector {
    * sequentially with the configured delay, so the load-spreading knob still works — it now
    * spreads a handful of batched calls instead of four calls per topic.
    *
-   * <p>A failure here fails the cycle (or marks the chunk partial) rather than silently
-   * yielding empty lag: {@link #finishCycle} is then skipped and existing gauges are kept.
-   * Stale values beat deleting live series over a transient broker error.
+   * <p>A failure here fails the cycle (or, when chunked, the chunk's groups) rather than
+   * silently yielding empty lag: {@link #finishCycle} is then skipped, or holds those groups'
+   * existing gauges. Stale values beat deleting live series over a transient broker error.
    *
    * <p>Topics are first filtered against the cluster's topic list. The Vert.x admin wrapper
    * resolves describeTopics through {@code allTopicNames()}, so a single unknown topic fails
    * the whole batch — and a group's committed offsets outlive a deleted topic until
-   * {@code offsets.retention.minutes} (7 days by default), which would keep every cycle
-   * partial, and therefore stale-gauge cleanup frozen, for that long. Dropping the topic here
-   * makes deletion look like deletion: its series go missing from the cycle's key set and are
-   * retired within 1-2 cycles.
+   * {@code offsets.retention.minutes} (7 days by default), which would fail every cycle (or
+   * every chunk touching it), and hold its groups' stale series, for that long. Dropping the
+   * topic here makes deletion look like deletion: its series go missing from the cycle's key
+   * set and are retired within 1-2 cycles.
    *
    * @return flattened topic-partition to offsets lookup for lag assembly
    */
@@ -954,8 +1013,11 @@ public class MetricsCollector {
 
     for (ConsumerGroupLag group : lagData) {
       for (PartitionLag p : group.partitions()) {
-        offsetTimestampTracker.recordOffset(p.topic(), p.partition(), p.logEndOffset());
-        timeLagKeys.add(p.topic() + ":" + p.partition());
+        // One poll sample per partition per cycle. Groups sharing a partition, in this call
+        // or an earlier chunk, would add duplicate points and shrink the retained window.
+        if (timeLagKeys.add(p.topic() + ":" + p.partition())) {
+          offsetTimestampTracker.recordOffset(p.topic(), p.partition(), p.logEndOffset());
+        }
       }
 
       Map<String, TopicLagMsAggregates> topicAggregates = new HashMap<>();
@@ -1039,9 +1101,9 @@ public class MetricsCollector {
    * Cycle-level accumulators shared by every chunk of one collection cycle.
    *
    * <p>Each set gathers the keys observed across all chunks so the retainAll-based
-   * cleanups in {@link #finishCycle(CycleState)} see the complete cycle. {@code partial}
-   * is set when a chunk fails, which suppresses cleanup for the cycle (the snapshot still
-   * publishes unless it is empty).
+   * cleanups in {@link #finishCycle(CycleState)} see the complete cycle. {@code failedGroups}
+   * collects the groups a chunk or offset fetch failed for; their previous keys are added
+   * back before cleanup (the snapshot still publishes unless it is empty).
    */
   private static class CycleState {
     final Set<String> activeKeys = new HashSet<>();
@@ -1050,8 +1112,9 @@ public class MetricsCollector {
     final Set<String> stateGroupKeys = new HashSet<>();
     final Set<String> timeLagKeys = new HashSet<>();
     final Set<String> commitStalenessKeys = new HashSet<>();
+    final Set<String> failedGroups = new HashSet<>();
+    final Map<String, ConsumerGroupLag> lagByGroup = new HashMap<>();
     final CycleSnapshot snapshot; // null when no snapshot store is attached
-    boolean partial;
 
     CycleState(CycleSnapshot snapshot) {
       this.snapshot = snapshot;

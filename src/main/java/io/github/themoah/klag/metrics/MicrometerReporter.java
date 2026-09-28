@@ -552,6 +552,26 @@ public class MicrometerReporter {
     }
   }
 
+  /**
+   * Adds existing gauges to {@code activeKeys} so {@link #cleanupStaleGauges} holds them: every
+   * gauge of a group in {@code groups}, and every gauge without a consumer group whose topic
+   * is in {@code topics}. Used for groups that failed a collection cycle.
+   *
+   * @param groups consumer groups whose series are held
+   * @param topics topics whose series without a consumer group are held
+   * @param activeKeys the cycle's active gauge keys, updated in place
+   */
+  public void holdGauges(Set<String> groups, Set<String> topics, Set<String> activeKeys) {
+    gauges.forEach((key, held) -> {
+      Meter.Id id = held.meter().getId();
+      String group = id.getTag("consumer_group");
+      String topic = id.getTag("topic");
+      if (group != null ? groups.contains(group) : topic != null && topics.contains(topic)) {
+        activeKeys.add(key);
+      }
+    });
+  }
+
   private void removeGauge(String key) {
     HeldGauge held = gauges.remove(key);
     if (held != null) {
