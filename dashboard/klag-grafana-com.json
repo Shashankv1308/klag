@@ -706,7 +706,7 @@
         "sortBy": []
       },
       "pluginVersion": "11.3.0",
-      "description": "One-hot state gauges: 1 marks the current state, 0 the others. Classic rebalances use preparing_rebalance/completing_rebalance; KIP-848 uses assigning/reconciling. State alone does not prove that offsets are advancing.",
+      "description": "The state tag identifies the consumer group state. The value counts consecutive state changes and is 0 on the first observation or when the state holds. Classic rebalances use preparing_rebalance/completing_rebalance; KIP-848 uses assigning/reconciling. State alone does not prove that offsets are advancing.",
       "title": "Consumer Group State",
       "type": "table",
       "targets": [
@@ -832,9 +832,9 @@
         }
       },
       "pluginVersion": "11.3.0",
-      "title": "Consumer Group State History",
+      "title": "Consumer Group State Changes",
       "type": "timeseries",
-      "description": "Current state gauges filtered to values above zero, shown over time. This is state history, not a cumulative transition counter; samples can miss transitions between scrapes.",
+      "description": "Groups whose state changed in a collection cycle. The value counts consecutive changes and resets to 0 once the state holds.",
       "targets": [
         {
           "refId": "A",
@@ -1597,7 +1597,7 @@
       "pluginVersion": "11.3.0",
       "title": "Retention Percent by Consumer Group",
       "type": "timeseries",
-      "description": "Topic-level retention risk. The raw gauge is percent multiplied by 100; this query divides by 100. The partition=\"\" selector keeps only aggregates. 100% indicates risk that required data is already outside the retention window.",
+      "description": "Topic-level retention risk. The raw gauge is percent multiplied by 100; this query divides by 100. The partition=\"\" selector keeps only aggregates. 100% means data loss has already occurred: the consumer is behind the log start offset.",
       "targets": [
         {
           "refId": "A",
@@ -1701,7 +1701,7 @@
       "pluginVersion": "11.3.0",
       "title": "At Risk Topics (>50% Retention Used)",
       "type": "table",
-      "description": "Group/topic aggregates above 50% retention usage. The query divides the raw gauge by 100 before comparing to 50; partition=\"\" excludes per-partition series. These are risk estimates, not verified data loss.",
+      "description": "Group/topic aggregates above 50% retention usage. The query divides the raw gauge by 100 before comparing to 50; partition=\"\" excludes per-partition series. Values below 100% indicate risk; 100% means data loss has already occurred because the consumer is behind the log start offset.",
       "targets": [
         {
           "refId": "A",
