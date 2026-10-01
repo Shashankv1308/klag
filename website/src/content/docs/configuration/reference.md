@@ -134,6 +134,7 @@ Invalid time-lag values log a warning and fall back to the documented defaults.
 |---|---|---|
 | `MCP_ENABLED` | `false` | Expose the `/mcp` endpoint (opt-in). |
 | `MCP_AUTH_TOKEN` | _(empty)_ | Require `Authorization: Bearer <token>` when set. |
+| `MCP_ALLOWED_ORIGINS` | _(empty)_ | Comma-separated browser origins allowed to call the endpoint, such as `https://ops.example.com`. A request with any other `Origin` header gets `403`; requests without one are not affected. |
 | `MCP_PATH` | `/mcp` | HTTP path of the MCP endpoint. |
 
 See [MCP Endpoint](/ai/mcp/) for details.

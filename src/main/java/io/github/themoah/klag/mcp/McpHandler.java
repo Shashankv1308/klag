@@ -16,9 +16,12 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Serves JSON-RPC 2.0 over POST (returning {@code application/json}); GET returns 405
  * since this server offers no server-initiated SSE stream. Optional bearer-token auth.
+ * Requests must send {@code Content-Type: application/json} (else 415), and an {@code Origin}
+ * not listed in {@code MCP_ALLOWED_ORIGINS} gets 403.
  *
- * <p>The protocol dispatch ({@link #dispatch}) and auth check ({@link #authorized}) are pure
- * and unit-tested independently of the Vert.x routing glue.
+ * <p>The protocol dispatch ({@link #dispatch}), auth check ({@link #authorized}) and header
+ * checks ({@link #originAllowed}, {@link #isJsonContentType}) are pure and unit-tested
+ * independently of the Vert.x routing glue.
  */
 public class McpHandler {
 
@@ -44,10 +47,11 @@ public class McpHandler {
    * @param router the Vert.x router
    */
   public void registerRoutes(Router router) {
-    // Auth runs on its own route ahead of the body handler so klag rejects unauthorized
-    // requests without buffering a single body byte (Vert.x forbids a USER handler before
-    // a BODY handler on the same route); the body limit caps what authorized clients can send.
-    router.post(config.path()).handler(this::checkAuth);
+    // Header checks and auth run on their own route ahead of the body handler so klag rejects
+    // bad or unauthorized requests without buffering a single body byte (Vert.x forbids a USER
+    // handler before a BODY handler on the same route); the body limit caps what authorized
+    // clients can send.
+    router.post(config.path()).handler(this::checkHeaders).handler(this::checkAuth);
     router.post(config.path())
       .handler(BodyHandler.create(false).setBodyLimit(MAX_BODY_BYTES))
       .handler(this::handlePost)
@@ -81,6 +85,25 @@ public class McpHandler {
       .putHeader("Allow", "POST")
       .putHeader("content-type", CONTENT_TYPE_JSON)
       .end("{\"error\":\"Method Not Allowed; use POST for JSON-RPC\"}");
+  }
+
+  private void checkHeaders(RoutingContext ctx) {
+    // Runs before auth, so a browser page gets 403 whether or not a token is configured.
+    if (!originAllowed(ctx.request().getHeader("Origin"))) {
+      ctx.response()
+        .setStatusCode(403)
+        .putHeader("content-type", CONTENT_TYPE_JSON)
+        .end("{\"error\":\"Forbidden; origin not allowed\"}");
+      return;
+    }
+    if (!isJsonContentType(ctx.request().getHeader("Content-Type"))) {
+      ctx.response()
+        .setStatusCode(415)
+        .putHeader("content-type", CONTENT_TYPE_JSON)
+        .end("{\"error\":\"Unsupported Media Type; use application/json\"}");
+      return;
+    }
+    ctx.next();
   }
 
   private void checkAuth(RoutingContext ctx) {
@@ -221,6 +244,35 @@ public class McpHandler {
     return MessageDigest.isEqual(
       config.authToken().getBytes(StandardCharsets.UTF_8),
       parts[1].getBytes(StandardCharsets.UTF_8));
+  }
+
+  /**
+   * Checks the Origin header against {@code MCP_ALLOWED_ORIGINS}. Browsers send Origin on every
+   * POST, so a page on another site, or one reached through DNS rebinding, is rejected unless
+   * listed. Agents, SDKs and curl send no Origin and are not affected.
+   *
+   * @param origin the Origin header value (may be null)
+   * @return true if there is no Origin header, or it is on the allowlist
+   */
+  public boolean originAllowed(String origin) {
+    // Scheme and host are case-insensitive; browsers send them in lowercase.
+    return origin == null || config.allowedOrigins().stream().anyMatch(origin::equalsIgnoreCase);
+  }
+
+  /**
+   * Checks that the request body is declared as JSON. Browsers send text/plain, form and
+   * multipart bodies to another site without a CORS preflight, so only JSON is accepted.
+   *
+   * @param contentType the Content-Type header value (may be null)
+   * @return true for application/json, ignoring case and parameters such as charset
+   */
+  public static boolean isJsonContentType(String contentType) {
+    if (contentType == null) {
+      return false;
+    }
+    int params = contentType.indexOf(';');
+    String mediaType = params < 0 ? contentType : contentType.substring(0, params);
+    return mediaType.trim().equalsIgnoreCase(CONTENT_TYPE_JSON);
   }
 
   private static void writeJson(RoutingContext ctx, int status, JsonObject body) {

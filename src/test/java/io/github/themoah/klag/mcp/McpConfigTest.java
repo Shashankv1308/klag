@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -49,5 +50,16 @@ class McpConfigTest {
   @Test
   void blankTokenTreatedAsNoAuth() {
     assertFalse(from(Map.of("MCP_AUTH_TOKEN", "   ")).authEnabled());
+  }
+
+  @Test
+  void noAllowedOriginsByDefault() {
+    assertEquals(List.of(), from(Map.of()).allowedOrigins());
+  }
+
+  @Test
+  void allowedOriginsAreSplitAndTrimmed() {
+    McpConfig c = from(Map.of("MCP_ALLOWED_ORIGINS", " https://ops.example.com , ,http://localhost:3000 "));
+    assertEquals(List.of("https://ops.example.com", "http://localhost:3000"), c.allowedOrigins());
   }
 }

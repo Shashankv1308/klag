@@ -139,12 +139,15 @@ interpolation. Time-to-close also requires shrinking lag and at least
 handle the added polling load. See [Lag Velocity](/metrics/lag-velocity/) and
 [Time-Based Lag](/metrics/time-based-lag/).
 
-## MCP 401, 405, or empty snapshot
+## MCP 401, 403, 405, 415, or empty snapshot
 
 **Likely cause:**
 
 - `401`: `MCP_AUTH_TOKEN` is set and the Bearer token is missing or wrong.
+- `403`: The request has an `Origin` header that is not in `MCP_ALLOWED_ORIGINS`.
+  Browsers send `Origin` on every POST; agents, SDKs, and curl do not.
 - `405`: The client sent `GET`; Klag accepts JSON-RPC 2.0 over `POST`.
+- `415`: The request did not send `Content-Type: application/json`.
 - Snapshot not ready: metrics collection is disabled or the first cycle has not
   succeeded, so no snapshot exists yet.
 - Snapshot empty (`groupCount: 0`): reports ran, but the group filters left no
@@ -152,8 +155,10 @@ handle the added polling load. See [Lag Velocity](/metrics/lag-velocity/) and
   returning stale data from an earlier run.
 
 **Fix:** Send `Authorization: Bearer <token>`, use a Streamable HTTP MCP client that
-posts JSON-RPC requests, and select a reporter with `METRICS_REPORTER`. Then resolve
-any Kafka or filtering problem reported in the logs. See [MCP Endpoint](/ai/mcp/).
+posts JSON-RPC requests with `Content-Type: application/json`, and select a reporter
+with `METRICS_REPORTER`. For a browser-based client, add its origin to
+`MCP_ALLOWED_ORIGINS`. Then resolve any Kafka or filtering problem reported in the
+logs. See [MCP Endpoint](/ai/mcp/).
 
 ## Prometheus does not discover the ServiceMonitor
 

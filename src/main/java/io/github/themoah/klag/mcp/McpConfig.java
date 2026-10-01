@@ -1,5 +1,7 @@
 package io.github.themoah.klag.mcp;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,11 +15,13 @@ import org.slf4j.LoggerFactory;
  * @param enabled whether the MCP endpoint is registered
  * @param authToken bearer token required for requests (blank = open)
  * @param path HTTP path of the MCP endpoint (always leading-slashed)
+ * @param allowedOrigins browser origins allowed to call the endpoint (empty = none)
  */
 public record McpConfig(
   boolean enabled,
   String authToken,
-  String path
+  String path,
+  List<String> allowedOrigins
 ) {
   private static final Logger log = LoggerFactory.getLogger(McpConfig.class);
 
@@ -42,10 +46,11 @@ public record McpConfig(
     boolean enabled = "true".equalsIgnoreCase(trimmed(env.apply("MCP_ENABLED")));
     String token = trimmed(env.apply("MCP_AUTH_TOKEN"));
     String rawPath = trimmed(env.apply("MCP_PATH"));
+    List<String> allowedOrigins = parseOrigins(env.apply("MCP_ALLOWED_ORIGINS"));
 
     String path = (rawPath == null || rawPath.isBlank()) ? DEFAULT_PATH : normalizePath(rawPath);
 
-    McpConfig config = new McpConfig(enabled, token == null ? "" : token, path);
+    McpConfig config = new McpConfig(enabled, token == null ? "" : token, path, allowedOrigins);
     if (enabled) {
       log.info("MCP endpoint enabled at {} (auth {})", path, config.authEnabled() ? "on" : "OFF");
       if (!config.authEnabled()) {
@@ -66,6 +71,16 @@ public record McpConfig(
 
   private static String normalizePath(String path) {
     return path.startsWith("/") ? path : "/" + path;
+  }
+
+  private static List<String> parseOrigins(String csv) {
+    if (csv == null) {
+      return List.of();
+    }
+    return Arrays.stream(csv.split(","))
+      .map(String::trim)
+      .filter(origin -> !origin.isEmpty())
+      .toList();
   }
 
   private static String trimmed(String value) {

@@ -189,6 +189,7 @@ Set `KLAG_CONFIG_FILE` to the path of an external `application.properties` (typi
 | `mcp.enabled` | Expose the read-only `/mcp` endpoint (sets `MCP_ENABLED`) | `false` |
 | `mcp.path` | HTTP path of the MCP endpoint | `/mcp` |
 | `mcp.authToken` | Bearer token, stored in a chart-managed Secret and injected as `MCP_AUTH_TOKEN`. Empty = unauthenticated (klag logs a warning) | `""` |
+| `mcp.allowedOrigins` | Comma-separated browser origins allowed to call the endpoint (sets `MCP_ALLOWED_ORIGINS`). Empty = any request with an `Origin` header gets `403` | `""` |
 | `mcp.existingSecret` | Existing secret holding the MCP token | `""` |
 | `mcp.secretKeys.authToken` | Key in secret for the token | `mcp-auth-token` |
 
