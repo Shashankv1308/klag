@@ -3,6 +3,7 @@ package io.github.themoah.klag.metrics.velocity;
 import io.github.themoah.klag.model.LagVelocity;
 import io.github.themoah.klag.model.TopicOffsetSnapshot;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,9 +56,20 @@ public class LagVelocityTracker {
    * Calculates velocities for all tracked consumer-group/topic pairs.
    */
   public List<LagVelocity> calculateVelocities() {
+    return calculateVelocities(histories.keySet());
+  }
+
+  /**
+   * Calculates velocities for the given {@link #makeKey} keys. Untracked keys are skipped.
+   */
+  public List<LagVelocity> calculateVelocities(Collection<String> keys) {
     List<LagVelocity> velocities = new ArrayList<>();
 
-    for (TopicLagHistory history : histories.values()) {
+    for (String key : keys) {
+      TopicLagHistory history = histories.get(key);
+      if (history == null) {
+        continue;
+      }
       LagVelocity velocity = history.calculateVelocity();
       if (velocity != null) {
         velocities.add(velocity);

@@ -72,19 +72,21 @@ Then add patterns back one at a time. Excludes run after includes. See
 
 ## Old series never disappear from `/metrics`
 
-**Likely cause:** Stale-gauge cleanup only runs after a **complete** collection cycle. If
-one group fails every cycle — a missing group `DESCRIBE` ACL, a wedged coordinator — the
-cycle is permanently partial and cleanup never runs, so series for deleted groups, topics,
-and rotated consumer members linger indefinitely. The log carries
+**Likely cause:** The series belong to a group that fails every cycle, for example because
+of a missing group `DESCRIBE` ACL or a wedged coordinator. Klag holds that group's last
+good series instead of deleting them, along with the topic series of topics no other group
+reports, for as long as the failure lasts. Series of every other group and topic are still
+cleaned up each cycle. The log carries
 `Failed to collect lag for group <id> (skipped this cycle)` and
-`Collection cycle was partial` every interval, naming the group.
+`Collection cycle was partial` every interval.
 
-This is deliberate: cleaning up against an incomplete key set would delete live series.
-Stale values beat deleted ones — but the freeze lasts as long as the failure does.
+This is deliberate: stale values beat deleting the series of a group that may only be
+failing for a while.
 
 **Fix:** Grant the group the [required ACLs](/kafka/acl-permissions/), or drop it with
-`METRICS_GROUP_EXCLUDE`. Cleanup resumes on the next complete cycle. The MCP snapshot is
-unaffected: it keeps publishing the groups that did succeed.
+`METRICS_GROUP_EXCLUDE`. Once the group is collected again or excluded, its series update
+or retire as usual. The MCP snapshot is unaffected: it keeps publishing the groups that did
+succeed.
 
 ## Lag keeps growing for a topic the group no longer consumes
 
@@ -104,7 +106,8 @@ Klag filters each cycle's topic set against the cluster's topic list before requ
 metadata, because the Kafka admin call fails as a whole if any topic in the batch is
 unknown — and a group's committed offsets outlive a deleted topic until
 `offsets.retention.minutes` (7 days by default). Without the filter, one deleted topic
-would keep every cycle partial, and cleanup frozen, for that long.
+would fail collection for every group in the same batch for that long, holding their stale
+series.
 
 The cost is an ACL asymmetry: `listTopics` only returns topics the principal can see. If
 Klag can read a group's committed offsets for a topic it cannot describe, that topic looks

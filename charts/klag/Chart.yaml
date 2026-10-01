@@ -34,6 +34,10 @@ annotations:
     - name: themoah
       email: aviv@dozorets.com
   artifacthub.io/changes: |
+    - kind: fixed
+      description: A consumer group that fails every cycle (ACL gap, wedged coordinator) no longer freezes stale-series cleanup for the whole cluster; only that group's last good series are held
+    - kind: fixed
+      description: A partition read by several groups or chunks gets one throughput and one lag_ms poll sample per cycle, and throughput hot partitions are detected once per cycle instead of per chunk, which removes false and duplicate results when KAFKA_CHUNK_COUNT is above 1
     - kind: security
       description: The MCP endpoint rejects requests from browser origins with 403 unless listed in mcp.allowedOrigins (MCP_ALLOWED_ORIGINS), and bodies that are not application/json with 415, so a web page cannot read consumer group data through DNS rebinding
     - kind: added

@@ -3,16 +3,20 @@ package io.github.themoah.klag.metrics;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.themoah.klag.kafka.ChunkConfig;
 import io.github.themoah.klag.kafka.KafkaClientService;
 import io.github.themoah.klag.metrics.hotpartition.HotPartitionConfig;
+import io.github.themoah.klag.metrics.snapshot.SnapshotStore;
 import io.github.themoah.klag.metrics.timelag.TimeLagConfig;
 import io.github.themoah.klag.metrics.velocity.LagVelocityTracker;
 import io.github.themoah.klag.model.ConsumerGroupOffsets;
 import io.github.themoah.klag.model.ConsumerGroupOffsets.TopicPartitionKey;
 import io.github.themoah.klag.model.ConsumerGroupState;
 import io.github.themoah.klag.model.ConsumerGroupState.State;
+import io.github.themoah.klag.model.HotPartitionThroughput;
 import io.github.themoah.klag.model.PartitionInfo;
 import io.github.themoah.klag.model.PartitionOffsets;
 import io.micrometer.core.instrument.Gauge;
@@ -32,8 +36,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * Verifies that chunked collection (KAFKA_CHUNK_COUNT > 1) does not let one chunk
- * invalidate state accumulated by another chunk, and that one failed chunk neither
- * aborts the remaining chunks nor causes gauges to be deleted.
+ * invalidate state accumulated by another chunk, that one failed chunk neither
+ * aborts the remaining chunks nor causes its gauges to be deleted, and that
+ * partitions shared across chunks are sampled and detected once per cycle.
  */
 @ExtendWith(VertxExtension.class)
 class MetricsCollectorChunkingTest {
@@ -50,6 +55,7 @@ class MetricsCollectorChunkingTest {
     volatile Map<String, State> states = new HashMap<>();
     volatile Set<String> failingGroups = Set.of();
     volatile Set<String> failingOffsetGroups = Set.of();
+    volatile int hotPartition = -1; // log end grows 100x faster on this partition
 
     ChunkedFakeKafka(Map<String, String> groupToTopic, Map<String, Integer> topicPartitions) {
       this.groupToTopic = groupToTopic;
@@ -83,8 +89,9 @@ class MetricsCollectorChunkingTest {
     @Override public Future<List<PartitionOffsets>> getLogEndOffsets(String topic) {
       List<PartitionOffsets> result = new ArrayList<>();
       for (int p = 0; p < topicPartitions.get(topic); p++) {
+        long end = p == hotPartition ? 100 * logEnd() : logEnd();
         // logEndTimestamp=0 and logStartTimestamp=0: Kafka anchors invalid -> fallback path
-        result.add(new PartitionOffsets(topic, p, logEnd(), 0, 0, logEnd(), 0, 3, 3));
+        result.add(new PartitionOffsets(topic, p, end, 0, 0, end, 0, 3, 3));
       }
       return Future.succeededFuture(result);
     }
@@ -241,6 +248,121 @@ class MetricsCollectorChunkingTest {
           .tag("consumer_group", "group-b").gauge();
         assertNotNull(lagSumB, "group-b lag gauge must exist");
         assertEquals(150.0, lagSumB.value(), "group-b must still be collected");
+        ctx.completeNow();
+      })));
+  }
+
+  @Test
+  void failingGroupHoldsOnlyItsOwnSeries(Vertx vertx, VertxTestContext ctx) {
+    // From cycle 4 group-c fails every cycle (ACL gap) and group-b is deleted. The failure
+    // must not keep group-b's series alive, and group-c must keep its last good values.
+    Map<String, String> groups = new HashMap<>(
+      Map.of("group-a", "topic-a", "group-b", "topic-b", "group-c", "topic-c"));
+    ChunkedFakeKafka kafka = new ChunkedFakeKafka(groups,
+      Map.of("topic-a", 1, "topic-b", 1, "topic-c", 1));
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    // The chunk delay keeps samples of consecutive cycles apart in time for the velocity fit.
+    MetricsCollector collector = new MetricsCollector(vertx, kafka,
+      new MicrometerReporter(registry), 60_000, "*", "",
+      new LagVelocityTracker(),
+      new HotPartitionConfig(false, 2.0, 3, 3, 20),
+      new TimeLagConfig(true, 100, 60, 180_000),
+      new ChunkConfig(2, 5));
+
+    // Three cycles give every group a velocity series, which needs three samples.
+    collector.collectOnce()
+      .compose(v -> collector.collectOnce())
+      .compose(v -> collector.collectOnce())
+      .compose(v -> {
+        ctx.verify(() -> assertNotNull(registry.find("klag.consumer.lag.velocity")
+          .tag("consumer_group", "group-b").gauge(), "group-b velocity must exist before it goes"));
+        groups.remove("group-b");
+        kafka.failingOffsetGroups = Set.of("group-c");
+        return collector.collectOnce();
+      })
+      .compose(v -> collector.collectOnce())
+      .onComplete(ctx.succeeding(v -> ctx.verify(() -> {
+        // Two-phase cleanup: marked in cycle 4, removed in cycle 5, velocity included.
+        List<String> groupB = registry.getMeters().stream()
+          .filter(m -> "group-b".equals(m.getId().getTag("consumer_group")))
+          .map(m -> m.getId().getName())
+          .toList();
+        assertTrue(groupB.isEmpty(), "every group-b series must be retired: " + groupB);
+        assertNull(registry.find("klag.topic.partitions").tag("topic", "topic-b").gauge());
+
+        Gauge lagSumC = registry.find("klag.consumer.lag.sum")
+          .tag("consumer_group", "group-c").gauge();
+        assertNotNull(lagSumC, "group-c series must be held while it fails");
+        assertEquals(150.0, lagSumC.value(), "group-c keeps its last good value (cycle 3)");
+        assertNotNull(registry.find("klag.consumer.lag.velocity")
+          .tag("consumer_group", "group-c").gauge());
+        assertNotNull(registry.find("klag.topic.partitions").tag("topic", "topic-c").gauge(),
+          "only group-c reads topic-c, so its topic series are held too");
+
+        assertEquals(250.0, registry.find("klag.consumer.lag.sum")
+          .tag("consumer_group", "group-a").gauge().value());
+        ctx.completeNow();
+      })));
+  }
+
+  @Test
+  void throughputIsSampledAndDetectedOncePerCycle(Vertx vertx, VertxTestContext ctx) {
+    // Both groups read topic-a and land in different chunks. With a minimum of three samples,
+    // a result after two cycles means a partition was sampled per chunk, not per cycle.
+    ChunkedFakeKafka kafka = new ChunkedFakeKafka(
+      Map.of("group-a", "topic-a", "group-b", "topic-a"), Map.of("topic-a", 4));
+    kafka.hotPartition = 3;
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    SnapshotStore store = new SnapshotStore();
+    MetricsCollector collector = new MetricsCollector(vertx, kafka,
+      new MicrometerReporter(registry), 60_000, "*", "",
+      new LagVelocityTracker(),
+      new HotPartitionConfig(true, 1.0, 3, 3, 20),
+      new TimeLagConfig(true, 100, 60, 180_000),
+      new ChunkConfig(2, 5));
+    collector.setSnapshotStore(store);
+
+    collector.collectOnce()
+      .compose(v -> collector.collectOnce())
+      .compose(v -> {
+        ctx.verify(() -> assertNull(registry.find("klag.hot_partition").gauge(),
+          "two cycles must give two samples per partition, below the minimum of three"));
+        return collector.collectOnce();
+      })
+      .onComplete(ctx.succeeding(v -> ctx.verify(() -> {
+        assertNotNull(registry.find("klag.hot_partition").tag("partition", "3").gauge(),
+          "partition 3 must be flagged once it has three samples");
+        List<HotPartitionThroughput> hot =
+          store.latest().orElseThrow().hotPartitionsByThroughput();
+        assertEquals(1, hot.size(), "one MCP row per hot partition, not one per chunk: " + hot);
+        assertEquals(3, hot.get(0).partition());
+        ctx.completeNow();
+      })));
+  }
+
+  @Test
+  void pollHistoryGetsOneSamplePerPartitionPerCycle(Vertx vertx, VertxTestContext ctx) {
+    // Both groups read topic-a and land in different chunks. The poll history keeps two
+    // points: a second sample per cycle would evict the previous cycle's point, leaving the
+    // later chunk's committed offset outside the history and without a lag_ms estimate.
+    ChunkedFakeKafka kafka = new ChunkedFakeKafka(
+      Map.of("group-a", "topic-a", "group-b", "topic-a"), Map.of("topic-a", 1));
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    MetricsCollector collector = new MetricsCollector(vertx, kafka,
+      new MicrometerReporter(registry), 60_000, "*", "",
+      new LagVelocityTracker(),
+      new HotPartitionConfig(false, 2.0, 3, 3, 20),
+      new TimeLagConfig(true, 100, 2, 180_000),
+      new ChunkConfig(2, 0));
+
+    collector.collectOnce()
+      .compose(v -> collector.collectOnce())
+      .onComplete(ctx.succeeding(v -> ctx.verify(() -> {
+        for (String group : List.of("group-a", "group-b")) {
+          assertNotNull(
+            registry.find("klag.consumer.lag.ms").tag("consumer_group", group).gauge(),
+            "lag_ms gauge must exist for " + group + " after two cycles");
+        }
         ctx.completeNow();
       })));
   }

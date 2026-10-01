@@ -42,9 +42,10 @@ and they need Docker. Do not run them speculatively.
 2. **Deleted topics are filtered before `describeTopics`.** One unknown topic fails the whole
    batch, and committed offsets outlive a deleted topic for `offsets.retention.minutes`. A
    failed `listTopics` must propagate, never fall through unfiltered.
-3. **Partial cycles skip stale-gauge cleanup but still publish the MCP snapshot.** Cleaning
-   against an incomplete key set would delete live series. An *empty* snapshot is never
-   published.
+3. **Partial cycles hold the failed groups' series and clean up the rest.** Cleaning against
+   the cycle's incomplete key set alone would delete live series, so the failed groups'
+   previous keys are added back first. The MCP snapshot still publishes, but an *empty*
+   snapshot is never published.
 4. **Adding a metric means updating `dashboard/demo-dashboard.json`** and the metrics tables
    in `CLAUDE.md` and `website/src/content/docs/metrics/`.
 5. **Version bumps.** One bump of `version` in `build.gradle.kts` per PR that changes the
