@@ -23,6 +23,7 @@ touches the collection flow.
 |---|---|---|
 | `MCP_ENABLED` | `false` | Expose the `/mcp` endpoint. |
 | `MCP_AUTH_TOKEN` | _(empty)_ | When set, requires `Authorization: Bearer <token>`. Empty = open (logged warning). |
+| `MCP_ALLOWED_ORIGINS` | _(empty)_ | Comma-separated origins allowed to call the endpoint from a browser. Empty = any request with an `Origin` header gets `403`. |
 | `MCP_PATH` | `/mcp` | HTTP path of the endpoint. |
 
 MCP requires `METRICS_REPORTER` to be set. The snapshot is only populated when metrics
@@ -31,7 +32,17 @@ collection runs. When more than one Kafka cluster is configured, the snapshot is
 
 ## Transport
 
-Streamable HTTP, **JSON-RPC 2.0 over POST**. A `GET` returns `405`.
+Streamable HTTP, **JSON-RPC 2.0 over POST**. A `GET` returns `405`. Requests must send
+`Content-Type: application/json` (a `charset` parameter is fine); other types get `415`.
+
+Browsers send an `Origin` header on every POST, so Klag answers `403` to any origin not
+listed in `MCP_ALLOWED_ORIGINS`. This stops web pages, including DNS rebinding attacks,
+from reading your consumer group data. Agents, SDKs, and curl send no `Origin` and are not
+affected.
+
+Klag sends no CORS headers, so a browser client on another origin also needs a reverse
+proxy that answers the `OPTIONS` preflight and adds them. Its origin still goes in
+`MCP_ALLOWED_ORIGINS`.
 
 The full HTTP surface, including this endpoint, is published as an OpenAPI 3.1 spec at
 [`klag.dev/openapi.json`](https://klag.dev/openapi.json).
@@ -312,8 +323,8 @@ Streamable-HTTP JSON-RPC POST endpoint, so any correct remote-MCP config will wo
 Once connected, ask the agent to `list_consumer_groups`, `find_lagging_groups`, or
 `diagnose` a specific group.
 
-For `401`, `405`, or snapshot-not-ready responses, see
-[Troubleshooting](/guides/troubleshooting/#mcp-401-405-or-empty-snapshot).
+For `401`, `403`, `405`, `415`, or snapshot-not-ready responses, see
+[Troubleshooting](/guides/troubleshooting/#mcp-401-403-405-415-or-empty-snapshot).
 
 ## Design
 

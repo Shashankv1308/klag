@@ -194,7 +194,31 @@
               }
             }
           },
-          "404": { "description": "`MCP_ENABLED` is false." }
+          "403": {
+            "description": "The request has an `Origin` header that is not listed in `MCP_ALLOWED_ORIGINS` (empty by default, so any `Origin` is rejected). Browsers send `Origin` on every POST; agents, SDKs, and curl send none. Checked before auth, and rejected before JSON-RPC framing, so the body is a plain error object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "error": { "type": "string", "example": "Forbidden; origin not allowed" } },
+                  "required": ["error"]
+                }
+              }
+            }
+          },
+          "404": { "description": "`MCP_ENABLED` is false." },
+          "415": {
+            "description": "The `Content-Type` is missing or its media type is not `application/json`. Parameters such as `charset` are ignored. Rejected before JSON-RPC framing, so the body is a plain error object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "error": { "type": "string", "example": "Unsupported Media Type; use application/json" } },
+                  "required": ["error"]
+                }
+              }
+            }
+          }
         }
       },
       "get": {

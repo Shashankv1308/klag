@@ -138,6 +138,10 @@ validate_output "DD_APP_KEY set" "${TESTS_DIR}/test-values-datadog.yaml" "DD_APP
 validate_output "DD_SITE set" "${TESTS_DIR}/test-values-datadog.yaml" "DD_SITE"
 validate_output "Datadog secret created" "${TESTS_DIR}/test-values-datadog.yaml" "name: test-release-klag-datadog"
 
+# MCP config validation
+validate_output "MCP_ALLOWED_ORIGINS set when allowedOrigins given" "" "MCP_ALLOWED_ORIGINS" "--set mcp.enabled=true --set mcp.allowedOrigins=https://ops.example.com"
+validate_not_present "MCP_ALLOWED_ORIGINS absent by default" "" "MCP_ALLOWED_ORIGINS" "--set mcp.enabled=true"
+
 # ServiceMonitor validation
 validate_output "ServiceMonitor created" "${TESTS_DIR}/test-values.yaml" "kind: ServiceMonitor"
 validate_output "ServiceMonitor scrapes /metrics" "${TESTS_DIR}/test-values.yaml" "path: /metrics"

@@ -164,6 +164,10 @@ spec:
                   name: {{ include "klag.mcpSecretName" . }}
                   key: {{ .Values.mcp.secretKeys.authToken }}
             {{- end }}
+            {{- if .Values.mcp.allowedOrigins }}
+            - name: MCP_ALLOWED_ORIGINS
+              value: {{ .Values.mcp.allowedOrigins | quote }}
+            {{- end }}
             {{- end }}
             # Logging configuration
             {{- if .Values.logging.level }}

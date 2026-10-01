@@ -94,7 +94,8 @@ class McpUploadIntegrationTest {
       + "Content-Type: text/plain\r\n\r\n"
       + "uploaded data\r\n--klag-test--\r\n";
     HttpResponse<String> upload = post("multipart/form-data; boundary=klag-test", multipart, null);
-    assertEquals(200, upload.statusCode());
+    // Rejected by the Content-Type check before the body handler reads a byte.
+    assertEquals(415, upload.statusCode());
     assertTrue(new JsonObject(upload.body()).containsKey("error"));
     assertFalse(Files.exists(workingDirectory.resolve("file-uploads")),
       "MCP must not create an upload directory or persist multipart file parts");
