@@ -234,8 +234,8 @@ public final class MicrometerConfig {
   }
 
   /**
-   * Creates a StatsD meter registry that pushes metric lines over UDP to a local agent
-   * (Datadog Agent, Telegraf, etc.). DogStatsD is the {@code datadog} flavor.
+   * Creates a StatsD meter registry that sends metric lines over UDP to the configured
+   * StatsD agent host (Datadog Agent, Telegraf, etc.). DogStatsD is the {@code datadog} flavor.
    */
   public static MeterRegistry createStatsdRegistry() {
     StatsdConfig config = statsdConfigFromEnvironment();
