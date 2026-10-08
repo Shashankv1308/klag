@@ -2,9 +2,9 @@ package io.github.themoah.klag.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.statsd.StatsdConfig;
@@ -13,8 +13,8 @@ import io.micrometer.statsd.StatsdMeterRegistry;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -32,7 +32,8 @@ import org.junit.jupiter.api.parallel.Resources;
  *
  * <p>Env vars can't be set in-process, so settings are supplied as JVM system properties,
  * which {@code Env} resolves after env vars. The UDP test binds a loopback socket as a
- * fake StatsD server and asserts a real gauge line arrives.
+ * fake StatsD server and asserts that a registry built by the factory delivers a real gauge
+ * line to it.
  */
 @ResourceLock(Resources.SYSTEM_PROPERTIES)
 class MicrometerConfigStatsdTest {
@@ -140,77 +141,57 @@ class MicrometerConfigStatsdTest {
     assertEquals(8125, MicrometerConfig.statsdConfigFromEnvironment().port());
   }
 
+  /**
+   * Drives the production path end to end: {@code createRegistry("statsd")} must send to the
+   * port it reads from the environment. The fake server listens on an ephemeral port, so a
+   * factory that ignored {@code STATSD_PORT} (e.g. a hardcoded 8125) never delivers.
+   */
   @Test
-  void createRegistrySelectsStatsd() {
-    MeterRegistry registry = MicrometerConfig.createRegistry("statsd");
-    try {
-      assertInstanceOf(StatsdMeterRegistry.class, registry);
-    } finally {
-      registry.close();
-    }
-  }
-
-  @Test
-  void sendsGaugeLineOverUdp() throws Exception {
+  void factorySendsGaugeLineToConfiguredPort() throws Exception {
     try (DatagramSocket server = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
-      server.setSoTimeout(5_000);
+      server.setSoTimeout(1_000);
       System.setProperty("STATSD_HOST", server.getLocalAddress().getHostAddress());
       System.setProperty("STATSD_PORT", Integer.toString(server.getLocalPort()));
 
-      StatsdConfig fromEnv = MicrometerConfig.statsdConfigFromEnvironment();
-      // Same host/port/flavor, but poll gauges every 100ms instead of 10s to keep the test fast.
-      StatsdConfig fastPolling = new StatsdConfig() {
-        @Override
-        public String host() {
-          return fromEnv.host();
-        }
-
-        @Override
-        public int port() {
-          return fromEnv.port();
-        }
-
-        @Override
-        public StatsdFlavor flavor() {
-          return fromEnv.flavor();
-        }
-
-        @Override
-        public Duration pollingFrequency() {
-          return Duration.ofMillis(100);
-        }
-
-        @Override
-        public String get(String key) {
-          return null;
-        }
-      };
-
-      StatsdMeterRegistry registry = new StatsdMeterRegistry(fastPolling, Clock.SYSTEM);
-      try {
+      // The registry connects its UDP channel asynchronously and drops lines emitted before
+      // that, so each attempt builds a fresh registry and waits longer before closing.
+      String line = null;
+      for (long settleMs = 50; line == null && settleMs <= 3_200; settleMs *= 2) {
+        MeterRegistry registry = MicrometerConfig.createRegistry("statsd");
+        assertInstanceOf(StatsdMeterRegistry.class, registry);
         Gauge.builder("klag.consumer.lag", new AtomicLong(100), AtomicLong::get)
           .tags("consumer_group", "orders", "topic", "payments")
           .strongReference(true)
           .register(registry);
 
-        String line = receiveLineStartingWith(server, "klag.consumer.lag:");
-
-        assertTrue(line.startsWith("klag.consumer.lag:100|g|#"), line);
-        assertTrue(line.contains("consumer_group:orders"), line);
-        assertTrue(line.contains("topic:payments"), line);
-      } finally {
+        Thread.sleep(settleMs);
+        // close() polls gauges and flushes the line buffer, so the test doesn't wait out
+        // the 10s polling interval.
         registry.close();
+        line = receiveLineStartingWith(server, "klag.consumer.lag:");
       }
+
+      assertNotNull(line, "no StatsD line arrived on the configured port");
+      assertTrue(line.startsWith("klag.consumer.lag:100|g|#"), line);
+      assertTrue(line.contains("consumer_group:orders"), line);
+      assertTrue(line.contains("topic:payments"), line);
     }
   }
 
-  /** Reads packets until one holds a matching line; a packet may carry several lines. */
+  /**
+   * Reads packets until one holds a matching line (a packet may carry several lines), or
+   * returns null once the socket times out.
+   */
   private static String receiveLineStartingWith(DatagramSocket server, String prefix)
       throws Exception {
     byte[] buffer = new byte[2048];
     while (true) {
       DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-      server.receive(packet); // throws SocketTimeoutException if nothing arrives in time
+      try {
+        server.receive(packet);
+      } catch (SocketTimeoutException e) {
+        return null;
+      }
       String payload = new String(
           packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
       for (String line : payload.split("\n")) {
