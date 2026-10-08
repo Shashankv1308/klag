@@ -26,10 +26,11 @@ resolve in this order: environment variable `NAME` → `-DNAME` → dotted
   `CONSUMER_MEMBER_LABELS_ENABLED`, `LAG_TREND_DEADBAND_MSG_PER_SEC`
 - all `HOT_PARTITION_*` and `TIME_LAG_*` settings listed below
 - `COMMIT_FRESHNESS_ENABLED`, `ISR_ENABLED`, `DATA_SKEW_ENABLED`, `DATA_SKEW_MIN_PARTITIONS`
+- `STATSD_HOST`, `STATSD_PORT`, `STATSD_FLAVOR`
 
-Kafka forwarding, `KLAG_CONFIG_FILE`, Vert.x, MCP, and reporter-specific integration
-settings such as `DD_*`, `OTLP_*`, and `OTEL_*` read environment variables directly and
-do not use that `-D` resolution chain. Logging is a separate exception: Logback can
+Kafka forwarding, `KLAG_CONFIG_FILE`, Vert.x, MCP, and the other reporter-specific
+integration settings (`DD_*`, `OTLP_*`, and `OTEL_*`) read environment variables directly
+and do not use that `-D` resolution chain. Logging is a separate exception: Logback can
 resolve exact-name JVM properties such as
 `-DLOG_LEVEL=DEBUG`, but it does not provide `Env`-style dotted aliases such as
 `-Dlog.level`.
